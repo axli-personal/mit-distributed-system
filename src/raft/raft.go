@@ -115,8 +115,10 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 type RequestVoteArgs struct {
-	Term        int // Candidate term.
-	CandidateId int
+	Term         int // Candidate term.
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 type RequestVoteReply struct {
@@ -124,15 +126,32 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+func (rf *Raft) canVoteFor(args *RequestVoteArgs) bool {
+	// Already voted for someone else.
+	if rf.votedFor >= 0 && rf.votedFor != args.CandidateId {
+		return false
+	}
+
+	// At least as up-to-date as my logs.
+	myLastLogIndex := len(rf.log) - 1
+	myLastLogTerm := rf.log[myLastLogIndex].Term
+
+	if args.LastLogTerm != myLastLogTerm {
+		return args.LastLogTerm > myLastLogTerm
+	}
+
+	return args.LastLogIndex >= myLastLogIndex
+}
+
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+	}()
 
 	if args.Term < rf.currentTerm {
-		*reply = RequestVoteReply{
-			Term:        rf.currentTerm,
-			VoteGranted: false,
-		}
+		reply.VoteGranted = false
 		return
 	}
 
@@ -140,18 +159,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.becomeFollower(args.Term)
 	}
 
-	if rf.votedFor < 0 || rf.votedFor == args.CandidateId {
-		rf.votedFor = args.CandidateId
-		*reply = RequestVoteReply{
-			Term:        rf.currentTerm,
-			VoteGranted: true,
-		}
-	} else {
-		*reply = RequestVoteReply{
-			Term:        rf.currentTerm,
-			VoteGranted: false,
-		}
+	if !rf.canVoteFor(args) {
+		reply.VoteGranted = false
+		return
 	}
+
+	rf.votedFor = args.CandidateId
+	reply.VoteGranted = true
 }
 
 type AppendEntriesArgs struct {
@@ -258,8 +272,10 @@ func (rf *Raft) startElection() {
 				return
 			}
 			args := RequestVoteArgs{
-				Term:        rf.currentTerm,
-				CandidateId: rf.me,
+				Term:         rf.currentTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: len(rf.log) - 1,
+				LastLogTerm:  rf.log[len(rf.log)-1].Term,
 			}
 			reply := RequestVoteReply{}
 
@@ -314,11 +330,13 @@ func (rf *Raft) broadcastHeartbeat() {
 			if rf.state != Leader {
 				return
 			}
+			// Send entries if have any.
 			args := AppendEntriesArgs{
 				Term:           rf.currentTerm,
 				PrevLogIndex:   rf.nextIndex[peer] - 1,
 				PrevLogTerm:    rf.log[rf.nextIndex[peer]-1].Term,
 				CommitLogIndex: rf.commitIndex,
+				Entries:        rf.log[rf.nextIndex[peer]:],
 			}
 			reply := AppendEntriesReply{}
 
@@ -339,7 +357,12 @@ func (rf *Raft) broadcastHeartbeat() {
 			}
 
 			if reply.Success {
-				rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+				// The peer definitely has consistent log entries before matchIndex.
+				matchIndex := args.PrevLogIndex + len(args.Entries)
+				if matchIndex > rf.matchIndex[peer] {
+					rf.matchIndex[peer] = matchIndex
+					rf.nextIndex[peer] = matchIndex + 1
+				}
 			} else {
 				rf.nextIndex[peer]--
 			}
