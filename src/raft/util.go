@@ -7,7 +7,7 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false
 
 func init() {
 	log.Default().SetFlags(log.Ltime | log.Lmicroseconds)

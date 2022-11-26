@@ -449,8 +449,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.mu.Lock()
 
 			if reply.Success {
-				rf.nextIndex[peer] += len(args.Entries)
-				rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+				// The peer definitely has consistent log entries before matchIndex.
+				matchIndex := args.PrevLogIndex + len(args.Entries)
+				if matchIndex > rf.matchIndex[peer] {
+					rf.matchIndex[peer] = matchIndex
+					rf.nextIndex[peer] = matchIndex + 1
+				}
 			}
 		}(i)
 	}
